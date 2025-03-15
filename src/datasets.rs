@@ -1,8 +1,8 @@
-//! Generates binary classification datasets and utilities for plotting them and decision boundaries
+//! Generates multiclass classification datasets and utilities for plotting them and decision boundaries
 //!
 //! By convention class 0 is plotted in red and class 1 is plotted in blue.
 
-use crate::{nn::Module, values::Value};
+use crate::{backprop_fns::BackpropFunc, nn::Module, values::Value};
 use std::{
     cmp::Ordering,
     error::Error,
@@ -14,7 +14,7 @@ use clap::ValueEnum;
 use plotters::{
     chart::ChartBuilder,
     prelude::{BitMapBackend, Circle, IntoDrawingArea, Rectangle},
-    style::{BLUE, Color, RED, RGBColor, WHITE},
+    style::{BLUE, Color, GREEN, RED, RGBColor, WHITE},
 };
 use rand::Rng;
 
@@ -26,6 +26,15 @@ pub enum Dataset {
     XOR,
     Moon,
 }
+
+/// Maps a class index to a color (for data points)
+const CLASS_COLORS: [RGBColor; 3] = [RED, BLUE, GREEN];
+/// Maps a class index to a color (for decision boundary), slightly transparent
+const DECISION_BOUNDARY_COLORS: [RGBColor; 3] = [
+    RGBColor(255, 200, 200),
+    RGBColor(200, 200, 255),
+    RGBColor(200, 255, 200),
+];
 
 impl Display for Dataset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -64,35 +73,29 @@ pub fn gen_linear_data(class_size: usize) -> (Vec<Vec<f32>>, Vec<Vec<u8>>) {
     (data, labels)
 }
 
-/// Generates a binary classification dataset of two concentric circles, labels are one hot encoded vectors
+/// Generates a multiclass classification dataset of three concentric circles, labels are one hot encoded vectors
 pub fn gen_circle_data(class_size: usize) -> (Vec<Vec<f32>>, Vec<Vec<u8>>) {
-    let n_c1 = class_size;
-    let n_c2 = class_size;
-    let c1_radius = 3.0;
-    let c2_radius = 5.0;
+    const N_CLASSES: usize = 3;
+    let c1_radius = 1.0;
+    let c2_radius = 3.0;
+    let c3_radius = 5.0;
+    let radii = vec![c1_radius, c2_radius, c3_radius];
 
     let mut rng = rand::rng();
     let mut data = Vec::new();
     let mut labels = Vec::new();
 
-    // Generate points for class 1
-    for _ in 0..n_c1 {
-        let angle = rng.random_range(0.0..2.0 * std::f32::consts::PI);
-        let radius_delta = c1_radius * rng.random_range(-0.25..0.25);
-        let x = (c1_radius + radius_delta) * angle.cos();
-        let y = (c1_radius + radius_delta) * angle.sin();
-        data.push(vec![x, y]);
-        labels.push(vec![1, 0]);
-    }
-
-    // Generate points for class 2
-    for _ in 0..n_c2 {
-        let angle = rng.random_range(0.0..2.0 * std::f32::consts::PI);
-        let radius_delta = c2_radius * rng.random_range(-0.25..0.25);
-        let x = (c2_radius + radius_delta) * angle.cos();
-        let y = (c2_radius + radius_delta) * angle.sin();
-        data.push(vec![x, y]);
-        labels.push(vec![0, 1]);
+    for (class_idx, radius) in radii.iter().enumerate() {
+        let mut gt_label = vec![0; N_CLASSES];
+        gt_label[class_idx] = 1;
+        for _ in 0..class_size {
+            let angle = rng.random_range(0.0..2.0 * std::f32::consts::PI);
+            let radius_delta = radius * rng.random_range(-0.25..0.25);
+            let x = (radius + radius_delta) * angle.cos();
+            let y = (radius + radius_delta) * angle.sin();
+            data.push(vec![x, y]);
+            labels.push(gt_label.clone());
+        }
     }
 
     (data, labels)
@@ -171,32 +174,21 @@ pub fn plot_data(
 
     chart.configure_mesh().draw()?;
 
-    let class1: Vec<&Vec<f32>> = data
-        .iter()
-        .zip(labels.iter())
-        .filter(|&(_, label)| get_class(label) == 0)
-        .map(|(data, _)| data)
-        .collect();
-    let class2: Vec<&Vec<f32>> = data
-        .iter()
-        .zip(labels.iter())
-        .filter(|&(_, label)| get_class(label) == 1)
-        .map(|(data, _)| data)
-        .collect();
+    let n_classes = labels[0].len();
 
-    // Plot class 1 points in red
-    chart.draw_series(
-        class1
+    for class_idx in 0..n_classes {
+        let class_data: Vec<&Vec<f32>> = data
             .iter()
-            .map(|data| Circle::new((data[0], data[1]), 3, RED.filled())),
-    )?;
-
-    // Plot class 2 points in blue
-    chart.draw_series(
-        class2
-            .iter()
-            .map(|data| Circle::new((data[0], data[1]), 3, BLUE.filled())),
-    )?;
+            .zip(labels.iter())
+            .filter(|&(_, label)| get_class(label) == class_idx)
+            .map(|(data, _)| data)
+            .collect();
+        chart.draw_series(
+            class_data
+                .iter()
+                .map(|data| Circle::new((data[0], data[1]), 3, CLASS_COLORS[class_idx].filled())),
+        )?;
+    }
 
     root_area.present()?;
     log::info!("Data plot has been saved to '{}'.", file_name);
@@ -230,9 +222,6 @@ pub fn plot_decision_boundary(
 
     chart.configure_mesh().draw()?;
 
-    let red_bg = RGBColor(255, 200, 200);
-    let blue_bg = RGBColor(200, 200, 255);
-
     let step = 0.20;
     let n_steps: f32 = (grid_max - grid_min) / step;
     let n_steps = n_steps.round() as i32;
@@ -252,7 +241,7 @@ pub fn plot_decision_boundary(
             .enumerate()
             .max_by(|(_, v), (_, v2)| v.data().partial_cmp(&v2.data()).unwrap_or(Ordering::Equal))
             .unwrap();
-        let color = if pred.0 == 0 { red_bg } else { blue_bg };
+        let color = DECISION_BOUNDARY_COLORS[pred.0];
 
         Rectangle::new(
             [
@@ -265,7 +254,7 @@ pub fn plot_decision_boundary(
 
     // plot the data points
     chart.draw_series(data.iter().zip(labels.iter()).map(|(data, label)| {
-        let color = if get_class(label) == 0 { RED } else { BLUE };
+        let color = CLASS_COLORS[get_class(label)];
         Circle::new((data[0], data[1]), 3, color.filled())
     }))?;
 
@@ -282,4 +271,95 @@ pub fn get_class(label: &[u8]) -> usize {
         .max_by_key(|(_, v)| **v)
         .map(|(i, _)| i)
         .unwrap()
+}
+
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::Write; // adjust path if needed
+
+/// Returns a fill color for each operation variant.
+fn color_for_op(op: &Option<BackpropFunc>) -> &'static str {
+    match op {
+        Some(BackpropFunc::Add) => "#FFF2B8",  // light yellow
+        Some(BackpropFunc::Sub) => "#FAD7D4",  // light red
+        Some(BackpropFunc::Mul) => "#D6EAF8",  // light blue
+        Some(BackpropFunc::Div) => "#F9E79F",  // a different yellow
+        Some(BackpropFunc::Neg) => "#F5EEF8",  // light purple/pink
+        Some(BackpropFunc::Pow) => "#FDEDEC",  // very light red
+        Some(BackpropFunc::ReLU) => "#D5F5E3", // light green
+        Some(BackpropFunc::Exp) => "#F5CBA7",  // orange
+        None => "#BBEFFF",                     // default color for leaf nodes
+    }
+}
+
+/// Generate a Graphviz DOT file that shows each Value node
+/// with (data, grad, operation) in a record-style label
+/// Apply to the root of the graph (i.e. loss output)
+/// View via a command like:
+/// ```sh
+/// dot -Tpng output.dot -o output.png
+/// ```
+pub fn draw_dot(root: &Value, filename: &str) -> std::io::Result<()> {
+    let mut visited = HashSet::new();
+    let mut nodes = String::new();
+    let mut edges = String::new();
+
+    fn traverse(v: &Value, visited: &mut HashSet<u64>, nodes: &mut String, edges: &mut String) {
+        let inner = v.0.borrow();
+        let node_id = inner.id();
+
+        if visited.contains(&node_id) {
+            return;
+        }
+        visited.insert(node_id);
+
+        // Build an operation label (e.g. "Add", "Mul", "ReLU", or "leaf")
+        let op_label = match &inner.backprop_fn {
+            Some(op) => format!("{:?}", op),
+            None => "leaf".to_string(),
+        };
+
+        // Create a label with shape=record:  { data=.. | grad=.. | op=.. }
+        let label = format!(
+            "{{ data={:.4} | grad={:.4} | {} }}",
+            inner.data, inner.grad, op_label
+        );
+
+        // Add this node to the DOT "nodes" list
+        nodes.push_str(&format!(
+            "  {} [label=\"{}\", shape=record, style=filled, fillcolor=\"{}\"];\n",
+            node_id,
+            label,
+            color_for_op(&inner.backprop_fn)
+        ));
+
+        // For each "child" in the node's `children`, draw an edge child -> current
+        for child_rc in inner.children() {
+            let child_value = Value(child_rc.clone());
+            let child_inner = child_value.0.borrow();
+            let child_id = child_inner.id();
+
+            edges.push_str(&format!("  {} -> {};\n", child_id, node_id));
+
+            traverse(&child_value, visited, nodes, edges);
+        }
+    }
+
+    // Start DFS from the root node
+    traverse(root, &mut visited, &mut nodes, &mut edges);
+
+    let dot_content = format!(
+        "digraph G {{
+  rankdir=LR; // Left-to-right layout
+  node [fontsize=12, fontname=\"Verdana\"];
+{}
+{}
+}}",
+        nodes, edges
+    );
+
+    let mut file = File::create(filename)?;
+    file.write_all(dot_content.as_bytes())?;
+    log::info!("Model graphviz file saved to '{}'.", filename);
+    Ok(())
 }

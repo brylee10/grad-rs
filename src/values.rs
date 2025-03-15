@@ -323,6 +323,14 @@ impl InnerValue {
             backprop_fn,
         }
     }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn children(&self) -> &[SharedValue] {
+        &self.children
+    }
 }
 
 fn generate_random_id() -> u64 {

@@ -1,4 +1,4 @@
-//! A simple implementation of a neural network for binary classification
+//! A simple implementation of a neural network for multiclass classification
 //! using the library provided by `grad_rs`
 //!
 //! # Usage
@@ -12,7 +12,7 @@
 
 use grad_rs::{
     dataloader::DataLoader,
-    datasets::{Dataset, load_dataset, plot_data, plot_decision_boundary},
+    datasets::{Dataset, draw_dot, load_dataset, plot_data, plot_decision_boundary},
     loss::MSELoss,
     nn::{Layer, Module, NNError, ReLU, Softmax},
     optim::{Optim, SGD},
@@ -42,11 +42,13 @@ struct Args {
     // Note that when increasing the hidden size, activation values may explode if
     // the weights are not initialized properly
     #[clap(long, default_value_t = 10)]
-    hidden_size: usize,
+    hidden_units: usize,
+    #[clap(long, default_value_t = false)]
+    graphviz: bool,
 }
 
 // A NN with one hidden layer, output is a vector of two values representing
-// the probability of each class for binary classification
+// the probability of each class
 struct Model {
     l1: Layer,
     l1_relu: ReLU,
@@ -55,11 +57,11 @@ struct Model {
 }
 
 impl Model {
-    fn new(hidden_size: usize) -> Self {
+    fn new(n_classes: usize, hidden_size: usize) -> Self {
         Self {
             l1: Layer::new(2, hidden_size),
             l1_relu: ReLU::new(),
-            l2: Layer::new(hidden_size, 2),
+            l2: Layer::new(hidden_size, n_classes),
             softmax: Softmax::new(),
         }
     }
@@ -92,6 +94,7 @@ fn main() {
     let (data, labels) = load_dataset(args.dataset, class_size);
     let data_clone = data.clone();
     let labels_clone = labels.clone();
+    let n_classes = labels[0].len();
 
     plot_data(
         &data,
@@ -102,14 +105,16 @@ fn main() {
     .unwrap();
 
     let epochs = args.epochs;
-    let model = Model::new(args.hidden_size);
+    let model = Model::new(n_classes, args.hidden_units);
     let mut optim = SGD::new(model.parameters(), args.lr, args.momentum);
     let data_loader = DataLoader::new(data, labels, minibatch_size, true).unwrap();
     let print_every = args.print_epochs;
+
     for epoch in 0..epochs {
         let data_loader_iter = data_loader.iter();
         let mut epoch_loss = Value::new(0.0);
         let mut total_n_dead_neurons = 0;
+        let mut loss_cached = Value::new(0.0);
         for (batch_data, batch_labels) in data_loader_iter {
             assert_eq!(batch_data.len(), batch_labels.len());
             assert_eq!(batch_data.len(), minibatch_size);
@@ -117,11 +122,12 @@ fn main() {
                 // note that after y_pred is freed, all the intermediate children (that are not model parameters) are also freed
                 // because their reference count drops to 0. This implicitly zeros the gradients of the intermediate children
                 let y_pred = model.forward(data).unwrap();
-                assert_eq!(y_pred.len(), 2);
+                assert_eq!(y_pred.len(), n_classes);
                 let loss = MSELoss::call(&y_pred, label);
                 loss.backward();
                 total_n_dead_neurons += model.l1_relu.n_dead_neurons();
-                epoch_loss = epoch_loss + loss;
+                epoch_loss = &epoch_loss + &loss;
+                loss_cached = loss;
             }
             // take steps in minibatches
             optim.step();
@@ -133,6 +139,18 @@ fn main() {
             total_n_dead_neurons / minibatch_size
         );
         if epoch % print_every == 0 || epoch == epochs - 1 {
+            if args.graphviz {
+                draw_dot(
+                    &loss_cached,
+                    &format!(
+                        "{}/weights_epoch_{}_{}.dot",
+                        args.output_dir,
+                        epoch + 1,
+                        args.dataset
+                    ),
+                )
+                .unwrap();
+            }
             log::info!("epoch: {}, epoch_loss: {}", epoch + 1, epoch_loss.data());
             plot_decision_boundary(
                 &model,
